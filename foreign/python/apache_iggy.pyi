@@ -691,6 +691,11 @@ class ReceiveMessage:
         Retrieves the timestamp of the received message.
         The timestamp represents the time of the message within its topic.
         """
+    def origin_timestamp(self) -> builtins.int:
+        r"""
+        Retrieves the origin timestamp of the received message.
+        The origin timestamp represents when the message was originally created.
+        """
     def id(self) -> builtins.int:
         r"""
         Retrieves the id of the received message.
@@ -710,6 +715,10 @@ class ReceiveMessage:
         r"""
         Retrieves the partition this message belongs to.
         """
+    def user_headers(self) -> dict[str, str | bytes | bool | int | float] | None:
+        r"""
+        Retrieves user headers attached to the received message.
+        """
 
 @typing.final
 class SendMessage:
@@ -718,7 +727,12 @@ class SendMessage:
     This class wraps a Rust message meant for sending, facilitating
     the creation of such messages from Python and their subsequent use in Rust.
     """
-    def __new__(cls, data: builtins.str | bytes) -> SendMessage:
+    def __new__(
+        cls,
+        data: builtins.str | bytes,
+        user_headers: dict[str, str | bytes | bool | int | float] | None = None,
+        id: builtins.int | None = None,
+    ) -> SendMessage:
         r"""
         Constructs a new `SendMessage` instance from a string or bytes.
         This method allows for the creation of a `SendMessage` instance
