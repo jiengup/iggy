@@ -16,12 +16,23 @@
 # under the License.
 
 import asyncio
+import base64
+import http.client
+import json
+import os
+import struct
 import uuid
+from typing import TypeAlias
 
 import pytest
 
 from apache_iggy import IggyClient, PollingStrategy
 from apache_iggy import SendMessage as Message
+
+HTTP_CREATED = 201
+JsonValue: TypeAlias = (
+    None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
+)
 
 
 class TestMessageOperations:
@@ -191,6 +202,77 @@ class TestMessageOperations:
         assert message.user_headers() == user_headers
         assert isinstance(message.origin_timestamp(), int)
         assert message.origin_timestamp() > 0
+
+    @pytest.mark.asyncio
+    async def test_message_user_headers_from_http_preserve_typed_numeric_values(
+        self, iggy_client: IggyClient, unique_name
+    ):
+        """Test Python can read header kinds its constructor cannot create."""
+        stream_name = unique_name()
+        topic_name = unique_name()
+        partition_id = 0
+        payload = "message from non-python producer"
+        header_values = [
+            ("signed-8", "int8", -8, (-8).to_bytes(1, "little", signed=True)),
+            ("signed-16", "int16", -1600, (-1600).to_bytes(2, "little", signed=True)),
+            (
+                "signed-32",
+                "int32",
+                -320000,
+                (-320000).to_bytes(4, "little", signed=True),
+            ),
+            (
+                "signed-128",
+                "int128",
+                -(2**100),
+                (-(2**100)).to_bytes(16, "little", signed=True),
+            ),
+            ("unsigned-8", "uint8", 8, (8).to_bytes(1, "little")),
+            ("unsigned-16", "uint16", 1600, (1600).to_bytes(2, "little")),
+            ("unsigned-32", "uint32", 320000, (320000).to_bytes(4, "little")),
+            ("unsigned-64", "uint64", 2**63, (2**63).to_bytes(8, "little")),
+            ("unsigned-128", "uint128", 2**100, (2**100).to_bytes(16, "little")),
+            ("float-32", "float32", 12.5, struct.pack("<f", 12.5)),
+        ]
+
+        await iggy_client.create_stream(stream_name)
+        await iggy_client.create_topic(
+            stream=stream_name, name=topic_name, partitions_count=1
+        )
+
+        send_message_with_http_headers(
+            stream_name,
+            topic_name,
+            payload,
+            [
+                header_entry("producer", "string", b"rust-http"),
+                *[
+                    header_entry(key, kind, value)
+                    for key, kind, _expected, value in header_values
+                ],
+            ],
+        )
+
+        polled_messages = await iggy_client.poll_messages(
+            stream=stream_name,
+            topic=topic_name,
+            partition_id=partition_id,
+            polling_strategy=PollingStrategy.Last(),
+            count=1,
+            auto_commit=True,
+        )
+
+        assert len(polled_messages) == 1
+        message = polled_messages[0]
+        assert message.payload().decode("utf-8") == payload
+        headers = message.user_headers()
+        assert headers is not None
+        assert headers["producer"] == "rust-http"
+        for key, kind, expected, _value in header_values:
+            if kind == "float32":
+                assert headers[key] == pytest.approx(expected)
+            else:
+                assert headers[key] == expected
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -848,3 +930,84 @@ class TestMessageOperations:
         assert [
             message.payload().decode("utf-8") for message in next_messages
         ] == existing_messages + new_messages
+
+
+def send_message_with_http_headers(
+    stream: str,
+    topic: str,
+    payload: str,
+    user_headers: list[JsonValue],
+):
+    host = os.environ.get("IGGY_SERVER_HOST", "127.0.0.1")
+    port = int(os.environ.get("IGGY_SERVER_HTTP_PORT", "3000"))
+    token = login_http_user(host, port)
+    body: dict[str, JsonValue] = {
+        "partitioning": {
+            "kind": "partition_id",
+            "value": encode_bytes((0).to_bytes(4)),
+        },
+        "messages": [
+            {
+                "payload": encode_bytes(payload.encode()),
+                "user_headers": user_headers,
+            }
+        ],
+    }
+
+    response_status, response_body = request_json(
+        host,
+        port,
+        "POST",
+        f"/streams/{stream}/topics/{topic}/messages",
+        body,
+        token,
+    )
+
+    assert response_status == HTTP_CREATED, response_body
+
+
+def login_http_user(host: str, port: int) -> str:
+    response_status, response_body = request_json(
+        host,
+        port,
+        "POST",
+        "/users/login",
+        {"username": "iggy", "password": "iggy"},
+    )
+
+    assert response_status == 200, response_body
+    token_info = json.loads(response_body)["access_token"]
+    return token_info["token"]
+
+
+def request_json(
+    host: str,
+    port: int,
+    method: str,
+    path: str,
+    body: dict[str, JsonValue],
+    token: str | None = None,
+) -> tuple[int, str]:
+    headers = {"Content-Type": "application/json"}
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+
+    connection = http.client.HTTPConnection(host, port)
+    try:
+        connection.request(method, path, json.dumps(body), headers)
+        response = connection.getresponse()
+        response_body = response.read().decode()
+        return response.status, response_body
+    finally:
+        connection.close()
+
+
+def header_entry(key: str, kind: str, value: bytes) -> dict[str, JsonValue]:
+    return {
+        "key": {"kind": "string", "value": encode_bytes(key.encode())},
+        "value": {"kind": kind, "value": encode_bytes(value)},
+    }
+
+
+def encode_bytes(value: bytes) -> str:
+    return base64.b64encode(value).decode()
