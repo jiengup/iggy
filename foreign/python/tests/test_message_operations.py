@@ -136,8 +136,61 @@ class TestMessageOperations:
         assert isinstance(msg.offset(), int) and msg.offset() >= 0
         assert isinstance(msg.id(), int) and msg.id() > 0
         assert isinstance(msg.timestamp(), int) and msg.timestamp() > 0
+        assert isinstance(msg.origin_timestamp(), int) and msg.origin_timestamp() > 0
         assert isinstance(msg.checksum(), int)
         assert isinstance(msg.length(), int) and msg.length() > 0
+        assert msg.user_headers() is None
+
+    @pytest.mark.asyncio
+    async def test_message_user_headers_round_trip(
+        self, iggy_client: IggyClient, unique_name
+    ):
+        """Test user headers preserve common Python value types."""
+        stream_name = unique_name()
+        topic_name = unique_name()
+        partition_id = 0
+        message_id = 123456789
+        user_headers = {
+            "content-type": "application/json",
+            "trace-blob": b"\x00\x01",
+            "is-retry": False,
+            "attempt": 3,
+            "score": 0.99,
+        }
+
+        await iggy_client.create_stream(stream_name)
+        await iggy_client.create_topic(
+            stream=stream_name, name=topic_name, partitions_count=1
+        )
+
+        await iggy_client.send_messages(
+            stream=stream_name,
+            topic=topic_name,
+            partitioning=partition_id,
+            messages=[
+                Message(
+                    "header round trip",
+                    user_headers=user_headers,
+                    id=message_id,
+                )
+            ],
+        )
+
+        polled_messages = await iggy_client.poll_messages(
+            stream=stream_name,
+            topic=topic_name,
+            partition_id=partition_id,
+            polling_strategy=PollingStrategy.Last(),
+            count=1,
+            auto_commit=True,
+        )
+
+        assert len(polled_messages) == 1
+        message = polled_messages[0]
+        assert message.id() == message_id
+        assert message.user_headers() == user_headers
+        assert isinstance(message.origin_timestamp(), int)
+        assert message.origin_timestamp() > 0
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -148,6 +201,25 @@ class TestMessageOperations:
         """Test empty string and bytes payloads are rejected."""
         with pytest.raises(ValueError, match="Invalid message payload length"):
             Message(payload)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("headers", "error"),
+        [
+            ({"": "value"}, "Invalid header value"),
+            ({"x" * 256: "value"}, "Invalid header value"),
+            ({"key": ""}, "Invalid header value"),
+            ({"key": b""}, "Invalid header value"),
+            ({"key": "x" * 256}, "Invalid header value"),
+            ({1: "value"}, "User header keys must be strings"),
+            ({"key": object()}, "User header values must be"),
+            ({"key": 2**63}, "signed 64-bit range"),
+        ],
+    )
+    async def test_invalid_user_headers_are_rejected(self, headers, error):
+        """Test invalid user header input raises ValueError."""
+        with pytest.raises(ValueError, match=error):
+            Message("payload", user_headers=headers)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
