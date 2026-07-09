@@ -15,14 +15,13 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use iggy::prelude::{
-    HeaderKind, HeaderValue, IggyMessage as RustReceiveMessage,
-    PollingStrategy as RustPollingStrategy,
-};
+use iggy::prelude::{IggyMessage as RustReceiveMessage, PollingStrategy as RustPollingStrategy};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyclass_complex_enum, gen_stub_pymethods};
+
+use crate::user_headers::rust_user_headers_to_py;
 
 /// A Python class representing a received message.
 /// This class wraps a Rust message, allowing for access to its payload and offset from Python.
@@ -85,7 +84,7 @@ impl ReceiveMessage {
 
     /// Retrieves user headers attached to the received message.
     #[gen_stub(override_return_type(
-        type_repr = "dict[str, str | bytes | bool | int | float] | None"
+        type_repr = "dict[str, str | bytes | bool | int | float] | dict[HeaderKey, HeaderValue] | None"
     ))]
     pub fn user_headers<'a>(&self, py: Python<'a>) -> PyResult<Option<Bound<'a, PyDict>>> {
         let Some(headers) = self
@@ -95,103 +94,8 @@ impl ReceiveMessage {
         else {
             return Ok(None);
         };
-
-        let result = PyDict::new(py);
-        for (key, value) in headers {
-            if key.kind() != HeaderKind::String {
-                return Err(PyValueError::new_err(
-                    "User header keys must be strings in the Python SDK",
-                ));
-            }
-            let key = key
-                .as_str()
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let value = rust_header_value_to_py(py, &value)?;
-            result.set_item(key, value)?;
-        }
-        Ok(Some(result))
+        rust_user_headers_to_py(py, headers).map(Some)
     }
-}
-
-fn rust_header_value_to_py<'a>(py: Python<'a>, value: &HeaderValue) -> PyResult<Bound<'a, PyAny>> {
-    match value.kind() {
-        HeaderKind::Raw => Ok(PyBytes::new(py, value.as_raw().map_err(to_value_error)?).into_any()),
-        HeaderKind::String => Ok(value
-            .as_str()
-            .map_err(to_value_error)?
-            .into_pyobject(py)?
-            .into_any()),
-        HeaderKind::Bool => Ok(value
-            .as_bool()
-            .map_err(to_value_error)?
-            .into_pyobject(py)?
-            .to_owned()
-            .into_any()),
-        HeaderKind::Int8 => Ok(value
-            .as_int8()
-            .map_err(to_value_error)?
-            .into_pyobject(py)?
-            .into_any()),
-        HeaderKind::Int16 => Ok(value
-            .as_int16()
-            .map_err(to_value_error)?
-            .into_pyobject(py)?
-            .into_any()),
-        HeaderKind::Int32 => Ok(value
-            .as_int32()
-            .map_err(to_value_error)?
-            .into_pyobject(py)?
-            .into_any()),
-        HeaderKind::Int64 => Ok(value
-            .as_int64()
-            .map_err(to_value_error)?
-            .into_pyobject(py)?
-            .into_any()),
-        HeaderKind::Int128 => Ok(value
-            .as_int128()
-            .map_err(to_value_error)?
-            .into_pyobject(py)?
-            .into_any()),
-        HeaderKind::Uint8 => Ok(value
-            .as_uint8()
-            .map_err(to_value_error)?
-            .into_pyobject(py)?
-            .into_any()),
-        HeaderKind::Uint16 => Ok(value
-            .as_uint16()
-            .map_err(to_value_error)?
-            .into_pyobject(py)?
-            .into_any()),
-        HeaderKind::Uint32 => Ok(value
-            .as_uint32()
-            .map_err(to_value_error)?
-            .into_pyobject(py)?
-            .into_any()),
-        HeaderKind::Uint64 => Ok(value
-            .as_uint64()
-            .map_err(to_value_error)?
-            .into_pyobject(py)?
-            .into_any()),
-        HeaderKind::Uint128 => Ok(value
-            .as_uint128()
-            .map_err(to_value_error)?
-            .into_pyobject(py)?
-            .into_any()),
-        HeaderKind::Float32 => Ok(value
-            .as_float32()
-            .map_err(to_value_error)?
-            .into_pyobject(py)?
-            .into_any()),
-        HeaderKind::Float64 => Ok(value
-            .as_float64()
-            .map_err(to_value_error)?
-            .into_pyobject(py)?
-            .into_any()),
-    }
-}
-
-fn to_value_error(error: impl ToString) -> PyErr {
-    PyValueError::new_err(error.to_string())
 }
 
 #[derive(Clone, Copy)]

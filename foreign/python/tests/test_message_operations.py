@@ -26,7 +26,7 @@ from typing import TypeAlias
 
 import pytest
 
-from apache_iggy import IggyClient, PollingStrategy
+from apache_iggy import HeaderKey, HeaderValue, IggyClient, PollingStrategy
 from apache_iggy import SendMessage as Message
 
 HTTP_CREATED = 201
@@ -204,53 +204,30 @@ class TestMessageOperations:
         assert message.origin_timestamp() > 0
 
     @pytest.mark.asyncio
-    async def test_message_user_headers_from_http_preserve_typed_numeric_values(
+    async def test_typed_message_user_headers_round_trip(
         self, iggy_client: IggyClient, unique_name
     ):
-        """Test Python can read header kinds its constructor cannot create."""
+        """Test typed user headers preserve explicit header kinds."""
         stream_name = unique_name()
         topic_name = unique_name()
         partition_id = 0
-        payload = "message from non-python producer"
-        header_values = [
-            ("signed-8", "int8", -8, (-8).to_bytes(1, "little", signed=True)),
-            ("signed-16", "int16", -1600, (-1600).to_bytes(2, "little", signed=True)),
-            (
-                "signed-32",
-                "int32",
-                -320000,
-                (-320000).to_bytes(4, "little", signed=True),
-            ),
-            (
-                "signed-128",
-                "int128",
-                -(2**100),
-                (-(2**100)).to_bytes(16, "little", signed=True),
-            ),
-            ("unsigned-8", "uint8", 8, (8).to_bytes(1, "little")),
-            ("unsigned-16", "uint16", 1600, (1600).to_bytes(2, "little")),
-            ("unsigned-32", "uint32", 320000, (320000).to_bytes(4, "little")),
-            ("unsigned-64", "uint64", 2**63, (2**63).to_bytes(8, "little")),
-            ("unsigned-128", "uint128", 2**100, (2**100).to_bytes(16, "little")),
-            ("float-32", "float32", 12.5, struct.pack("<f", 12.5)),
-        ]
+        typed_key = HeaderKey.UnsignedInt128(42)
+        typed_value = HeaderValue.UnsignedInt128(2**96)
+        user_headers: dict[HeaderKey, HeaderValue] = {
+            typed_key: typed_value,
+            HeaderKey.String("float32"): HeaderValue.Float32(1.25),
+        }
 
         await iggy_client.create_stream(stream_name)
         await iggy_client.create_topic(
             stream=stream_name, name=topic_name, partitions_count=1
         )
 
-        send_message_with_http_headers(
-            stream_name,
-            topic_name,
-            payload,
-            [
-                header_entry("producer", "string", b"rust-http"),
-                *[
-                    header_entry(key, kind, value)
-                    for key, kind, _expected, value in header_values
-                ],
-            ],
+        await iggy_client.send_messages(
+            stream=stream_name,
+            topic=topic_name,
+            partitioning=partition_id,
+            messages=[Message("typed headers", user_headers=user_headers)],
         )
 
         polled_messages = await iggy_client.poll_messages(
@@ -263,16 +240,8 @@ class TestMessageOperations:
         )
 
         assert len(polled_messages) == 1
-        message = polled_messages[0]
-        assert message.payload().decode("utf-8") == payload
-        headers = message.user_headers()
-        assert headers is not None
-        assert headers["producer"] == "rust-http"
-        for key, kind, expected, _value in header_values:
-            if kind == "float32":
-                assert headers[key] == pytest.approx(expected)
-            else:
-                assert headers[key] == expected
+        headers = polled_messages[0].user_headers()
+        assert headers == user_headers
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -296,12 +265,36 @@ class TestMessageOperations:
             ({1: "value"}, "User header keys must be strings"),
             ({"key": object()}, "User header values must be"),
             ({"key": 2**63}, "signed 64-bit range"),
+            ({HeaderKey.String("key"): "value"}, "HeaderValue"),
         ],
     )
     async def test_invalid_user_headers_are_rejected(self, headers, error):
         """Test invalid user header input raises ValueError."""
         with pytest.raises(ValueError, match=error):
             Message("payload", user_headers=headers)
+
+    def test_typed_user_headers_can_be_constructed(self):
+        """Test typed header keys and values cover the full header kind surface."""
+        Message(
+            "payload",
+            user_headers={
+                HeaderKey.Raw(b"raw-key"): HeaderValue.Raw(b"raw-value"),
+                HeaderKey.String("string-key"): HeaderValue.String("string-value"),
+                HeaderKey.Bool(True): HeaderValue.Bool(False),
+                HeaderKey.Int8(-8): HeaderValue.Int8(-7),
+                HeaderKey.Int16(-16): HeaderValue.Int16(-15),
+                HeaderKey.Int32(-32): HeaderValue.Int32(-31),
+                HeaderKey.Int64(-64): HeaderValue.Int64(-63),
+                HeaderKey.Int128(-(2**80)): HeaderValue.Int128(-(2**79)),
+                HeaderKey.UnsignedInt8(8): HeaderValue.UnsignedInt8(9),
+                HeaderKey.UnsignedInt16(16): HeaderValue.UnsignedInt16(17),
+                HeaderKey.UnsignedInt32(32): HeaderValue.UnsignedInt32(33),
+                HeaderKey.UnsignedInt64(64): HeaderValue.UnsignedInt64(65),
+                HeaderKey.UnsignedInt128(2**80): HeaderValue.UnsignedInt128(2**79),
+                HeaderKey.Float32(1.25): HeaderValue.Float32(2.5),
+                HeaderKey.Float64(3.5): HeaderValue.Float64(4.75),
+            },
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

@@ -31,6 +31,8 @@ __all__ = [
     "ConsumerGroup",
     "ConsumerGroupDetails",
     "ConsumerGroupMember",
+    "HeaderKey",
+    "HeaderValue",
     "IggyClient",
     "IggyConsumer",
     "PollingStrategy",
@@ -302,6 +304,356 @@ class ConsumerGroupMember:
         r"""
         Gets the collection of partitions the consumer group member is consuming.
         """
+
+class HeaderKey:
+    r"""
+    Typed key for an Iggy user header.
+
+    Use these constructors when the header key must preserve an explicit
+    wire type instead of using the common string-key dictionary form.
+    """
+    def __hash__(self) -> builtins.int: ...
+    def __richcmp__(self, other: typing.Any, op: int) -> typing.Any: ...
+    def __repr__(self) -> builtins.str: ...
+    @typing.final
+    class Raw(HeaderKey):
+        r"""
+        Raw bytes key. The byte length must be 1..=255.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> bytes: ...
+        def __new__(cls, value: bytes) -> HeaderKey.Raw: ...
+
+    @typing.final
+    class String(HeaderKey):
+        r"""
+        UTF-8 string key. The encoded byte length must be 1..=255.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.str: ...
+        def __new__(cls, value: builtins.str) -> HeaderKey.String: ...
+
+    @typing.final
+    class Bool(HeaderKey):
+        r"""
+        Boolean key.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.bool: ...
+        def __new__(cls, value: builtins.bool) -> HeaderKey.Bool: ...
+
+    @typing.final
+    class Int8(HeaderKey):
+        r"""
+        Signed 8-bit integer key.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.int: ...
+        def __new__(cls, value: builtins.int) -> HeaderKey.Int8: ...
+
+    @typing.final
+    class Int16(HeaderKey):
+        r"""
+        Signed 16-bit integer key.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.int: ...
+        def __new__(cls, value: builtins.int) -> HeaderKey.Int16: ...
+
+    @typing.final
+    class Int32(HeaderKey):
+        r"""
+        Signed 32-bit integer key.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.int: ...
+        def __new__(cls, value: builtins.int) -> HeaderKey.Int32: ...
+
+    @typing.final
+    class Int64(HeaderKey):
+        r"""
+        Signed 64-bit integer key.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.int: ...
+        def __new__(cls, value: builtins.int) -> HeaderKey.Int64: ...
+
+    @typing.final
+    class Int128(HeaderKey):
+        r"""
+        Signed 128-bit integer key.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.int: ...
+        def __new__(cls, value: builtins.int) -> HeaderKey.Int128: ...
+
+    @typing.final
+    class UnsignedInt8(HeaderKey):
+        r"""
+        Unsigned 8-bit integer key.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.int: ...
+        def __new__(cls, value: builtins.int) -> HeaderKey.UnsignedInt8: ...
+
+    @typing.final
+    class UnsignedInt16(HeaderKey):
+        r"""
+        Unsigned 16-bit integer key.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.int: ...
+        def __new__(cls, value: builtins.int) -> HeaderKey.UnsignedInt16: ...
+
+    @typing.final
+    class UnsignedInt32(HeaderKey):
+        r"""
+        Unsigned 32-bit integer key.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.int: ...
+        def __new__(cls, value: builtins.int) -> HeaderKey.UnsignedInt32: ...
+
+    @typing.final
+    class UnsignedInt64(HeaderKey):
+        r"""
+        Unsigned 64-bit integer key.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.int: ...
+        def __new__(cls, value: builtins.int) -> HeaderKey.UnsignedInt64: ...
+
+    @typing.final
+    class UnsignedInt128(HeaderKey):
+        r"""
+        Unsigned 128-bit integer key.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.int: ...
+        def __new__(cls, value: builtins.int) -> HeaderKey.UnsignedInt128: ...
+
+    @typing.final
+    class Float32(HeaderKey):
+        r"""
+        32-bit floating point key.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.float: ...
+        def __new__(cls, value: builtins.float) -> HeaderKey.Float32: ...
+
+    @typing.final
+    class Float64(HeaderKey):
+        r"""
+        64-bit floating point key.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.float: ...
+        def __new__(cls, value: builtins.float) -> HeaderKey.Float64: ...
+
+class HeaderValue:
+    r"""
+    Typed value for an Iggy user header.
+
+    Use these constructors when the header value must preserve an explicit
+    wire type instead of using the common Python scalar dictionary form.
+    """
+    def __hash__(self) -> builtins.int: ...
+    def __richcmp__(self, other: typing.Any, op: int) -> typing.Any: ...
+    def __repr__(self) -> builtins.str: ...
+    @typing.final
+    class Raw(HeaderValue):
+        r"""
+        Raw bytes value. The byte length must be 1..=255.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> bytes: ...
+        def __new__(cls, value: bytes) -> HeaderValue.Raw: ...
+
+    @typing.final
+    class String(HeaderValue):
+        r"""
+        UTF-8 string value. The encoded byte length must be 1..=255.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.str: ...
+        def __new__(cls, value: builtins.str) -> HeaderValue.String: ...
+
+    @typing.final
+    class Bool(HeaderValue):
+        r"""
+        Boolean value.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.bool: ...
+        def __new__(cls, value: builtins.bool) -> HeaderValue.Bool: ...
+
+    @typing.final
+    class Int8(HeaderValue):
+        r"""
+        Signed 8-bit integer value.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.int: ...
+        def __new__(cls, value: builtins.int) -> HeaderValue.Int8: ...
+
+    @typing.final
+    class Int16(HeaderValue):
+        r"""
+        Signed 16-bit integer value.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.int: ...
+        def __new__(cls, value: builtins.int) -> HeaderValue.Int16: ...
+
+    @typing.final
+    class Int32(HeaderValue):
+        r"""
+        Signed 32-bit integer value.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.int: ...
+        def __new__(cls, value: builtins.int) -> HeaderValue.Int32: ...
+
+    @typing.final
+    class Int64(HeaderValue):
+        r"""
+        Signed 64-bit integer value.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.int: ...
+        def __new__(cls, value: builtins.int) -> HeaderValue.Int64: ...
+
+    @typing.final
+    class Int128(HeaderValue):
+        r"""
+        Signed 128-bit integer value.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.int: ...
+        def __new__(cls, value: builtins.int) -> HeaderValue.Int128: ...
+
+    @typing.final
+    class UnsignedInt8(HeaderValue):
+        r"""
+        Unsigned 8-bit integer value.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.int: ...
+        def __new__(cls, value: builtins.int) -> HeaderValue.UnsignedInt8: ...
+
+    @typing.final
+    class UnsignedInt16(HeaderValue):
+        r"""
+        Unsigned 16-bit integer value.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.int: ...
+        def __new__(cls, value: builtins.int) -> HeaderValue.UnsignedInt16: ...
+
+    @typing.final
+    class UnsignedInt32(HeaderValue):
+        r"""
+        Unsigned 32-bit integer value.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.int: ...
+        def __new__(cls, value: builtins.int) -> HeaderValue.UnsignedInt32: ...
+
+    @typing.final
+    class UnsignedInt64(HeaderValue):
+        r"""
+        Unsigned 64-bit integer value.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.int: ...
+        def __new__(cls, value: builtins.int) -> HeaderValue.UnsignedInt64: ...
+
+    @typing.final
+    class UnsignedInt128(HeaderValue):
+        r"""
+        Unsigned 128-bit integer value.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.int: ...
+        def __new__(cls, value: builtins.int) -> HeaderValue.UnsignedInt128: ...
+
+    @typing.final
+    class Float32(HeaderValue):
+        r"""
+        32-bit floating point value.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.float: ...
+        def __new__(cls, value: builtins.float) -> HeaderValue.Float32: ...
+
+    @typing.final
+    class Float64(HeaderValue):
+        r"""
+        64-bit floating point value.
+        """
+
+        __match_args__ = ("value",)
+        @property
+        def value(self) -> builtins.float: ...
+        def __new__(cls, value: builtins.float) -> HeaderValue.Float64: ...
 
 @typing.final
 class IggyClient:
@@ -715,7 +1067,13 @@ class ReceiveMessage:
         r"""
         Retrieves the partition this message belongs to.
         """
-    def user_headers(self) -> dict[str, str | bytes | bool | int | float] | None:
+    def user_headers(
+        self,
+    ) -> (
+        dict[str, str | bytes | bool | int | float]
+        | dict[HeaderKey, HeaderValue]
+        | None
+    ):
         r"""
         Retrieves user headers attached to the received message.
         """
@@ -730,7 +1088,9 @@ class SendMessage:
     def __new__(
         cls,
         data: builtins.str | bytes,
-        user_headers: dict[str, str | bytes | bool | int | float] | None = None,
+        user_headers: dict[str, str | bytes | bool | int | float]
+        | dict[HeaderKey, HeaderValue]
+        | None = None,
         id: builtins.int | None = None,
     ) -> SendMessage:
         r"""
