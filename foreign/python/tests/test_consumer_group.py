@@ -761,7 +761,9 @@ class TestConsumerGroup:
         )
 
         async def take(message: ReceiveMessage) -> None:
-            received_headers.append(message.user_headers())
+            headers = message.user_headers()
+            assert headers is not None
+            received_headers.append(headers.to_plain())
             shutdown_event.set()
 
         async def send() -> None:
@@ -860,7 +862,9 @@ class TestConsumerGroup:
         iterator = consumer.iter_messages()
         message = await asyncio.wait_for(iterator.__anext__(), timeout=5)
 
-        assert message.user_headers() == expected_headers
+        headers = message.user_headers()
+        assert headers is not None
+        assert headers.to_plain() == expected_headers
 
     @pytest.mark.asyncio
     async def test_iter_messages_with_first_reads_existing_messages(

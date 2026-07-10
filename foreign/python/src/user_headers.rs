@@ -18,22 +18,17 @@
 use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::str::FromStr;
 
-use iggy::prelude::{HeaderKey as RustHeaderKey, HeaderKind, HeaderValue as RustHeaderValue};
+use iggy::prelude::{
+    HeaderField, HeaderKey as RustHeaderKey, HeaderKind, HeaderValue as RustHeaderValue,
+};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::pyclass::CompareOp;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyInt, PyString};
-use pyo3_stub_gen::derive::{gen_stub_pyclass_complex_enum, gen_stub_pymethods};
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyclass_complex_enum, gen_stub_pymethods};
 
 type RustUserHeaders = BTreeMap<RustHeaderKey, RustHeaderValue>;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PyUserHeadersKind {
-    Plain,
-    Typed,
-}
 
 #[gen_stub_pyclass_complex_enum]
 #[pyclass]
@@ -175,12 +170,12 @@ impl HeaderKey {
             HeaderKey::UnsignedInt32 { value } => Ok((*value).into()),
             HeaderKey::UnsignedInt64 { value } => Ok((*value).into()),
             HeaderKey::UnsignedInt128 { value } => Ok((*value).into()),
-            HeaderKey::Float32 { value } => Ok((*value).into()),
+            HeaderKey::Float32 { value } => checked_float32(*value),
             HeaderKey::Float64 { value } => Ok((*value).into()),
         }
     }
 
-    fn from_rust(py: Python<'_>, value: &RustHeaderKey) -> PyResult<Py<Self>> {
+    fn from_rust<'a>(py: Python<'a>, value: &RustHeaderKey) -> PyResult<Bound<'a, Self>> {
         let key = match value.kind() {
             HeaderKind::Raw => HeaderKey::Raw {
                 value: PyBytes::new(py, value.as_raw().map_err(to_value_error)?).unbind(),
@@ -228,7 +223,7 @@ impl HeaderKey {
                 value: value.as_float64().map_err(to_value_error)?,
             },
         };
-        Py::new(py, key)
+        key.into_pyobject(py)
     }
 
     fn identity(&self, py: Python<'_>) -> PyResult<HeaderIdentity> {
@@ -295,12 +290,12 @@ impl HeaderValue {
             HeaderValue::UnsignedInt32 { value } => Ok((*value).into()),
             HeaderValue::UnsignedInt64 { value } => Ok((*value).into()),
             HeaderValue::UnsignedInt128 { value } => Ok((*value).into()),
-            HeaderValue::Float32 { value } => Ok((*value).into()),
+            HeaderValue::Float32 { value } => checked_float32(*value),
             HeaderValue::Float64 { value } => Ok((*value).into()),
         }
     }
 
-    fn from_rust(py: Python<'_>, value: &RustHeaderValue) -> PyResult<Py<Self>> {
+    fn from_rust<'a>(py: Python<'a>, value: &RustHeaderValue) -> PyResult<Bound<'a, Self>> {
         let value = match value.kind() {
             HeaderKind::Raw => HeaderValue::Raw {
                 value: PyBytes::new(py, value.as_raw().map_err(to_value_error)?).unbind(),
@@ -348,7 +343,7 @@ impl HeaderValue {
                 value: value.as_float64().map_err(to_value_error)?,
             },
         };
-        Py::new(py, value)
+        value.into_pyobject(py)
     }
 
     fn identity(&self, py: Python<'_>) -> PyResult<HeaderIdentity> {
@@ -520,20 +515,11 @@ pub(crate) fn py_user_headers_to_rust(
     py: Python<'_>,
     headers: &Bound<'_, PyDict>,
 ) -> PyResult<RustUserHeaders> {
-    let mut headers_kind = None;
+    // Each key/value pair is converted independently: typed `HeaderKey` /
+    // `HeaderValue` are used as-is, while plain Python scalars are converted on
+    // a best-effort basis.
     let mut rust_headers = BTreeMap::new();
     for (key, value) in headers.iter() {
-        let entry_kind = py_user_header_entry_kind(&key, &value)?;
-        if let Some(headers_kind) = headers_kind {
-            if headers_kind != entry_kind {
-                return Err(PyValueError::new_err(
-                    "User headers must be either dict[str, str | bytes | bool | int | float] or dict[HeaderKey, HeaderValue]",
-                ));
-            }
-        } else {
-            headers_kind = Some(entry_kind);
-        }
-
         let key = py_header_key_to_rust(py, &key)?;
         let value = py_header_value_to_rust(py, &value)?;
         rust_headers.insert(key, value);
@@ -544,171 +530,269 @@ pub(crate) fn py_user_headers_to_rust(
 pub(crate) fn rust_user_headers_to_py<'a>(
     py: Python<'a>,
     headers: RustUserHeaders,
-) -> PyResult<Bound<'a, PyDict>> {
-    if can_use_plain_headers(&headers) {
-        return rust_user_headers_to_plain_py(py, headers);
-    }
-
-    let result = PyDict::new(py);
+) -> PyResult<Bound<'a, UserHeaders>> {
+    // Always expose the explicitly typed dict[HeaderKey, HeaderValue] so that
+    // no wire-type information is silently dropped. Callers who prefer the
+    // convenient plain form opt in through `UserHeaders.to_plain`.
+    let result = Bound::new(py, UserHeaders)?;
+    let mapping = result.as_any();
     for (key, value) in headers {
         let key = HeaderKey::from_rust(py, &key)?;
         let value = HeaderValue::from_rust(py, &value)?;
-        result.set_item(key, value)?;
+        mapping.set_item(key, value)?;
     }
     Ok(result)
 }
 
-fn py_user_header_entry_kind(
-    key: &Bound<'_, PyAny>,
-    value: &Bound<'_, PyAny>,
-) -> PyResult<PyUserHeadersKind> {
-    let key_is_typed = key.extract::<PyRef<'_, HeaderKey>>().is_ok();
-    let key_is_plain = key.is_instance_of::<PyString>();
-    if !key_is_typed && !key_is_plain {
-        return Err(PyValueError::new_err(
-            "User header keys must be strings or HeaderKey",
-        ));
+/// User headers dictionary returned by `ReceiveMessage.user_headers`.
+///
+/// This is a regular `dict[HeaderKey, HeaderValue]` (so all mapping
+/// operations work) that additionally exposes `to_plain` for the convenient
+/// scalar form.
+#[gen_stub_pyclass]
+#[pyclass(extends=PyDict)]
+pub struct UserHeaders;
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl UserHeaders {
+    /// Wraps a mapping so its entries gain the `to_plain` helper.
+    ///
+    /// Accepts a dict whose keys and values can each independently be
+    /// `HeaderKey`/`HeaderValue` or a plain scalar (`str | bytes | bool |
+    /// int | float`). The inherited `dict` initializer copies the provided
+    /// mapping.
+    #[new]
+    #[pyo3(signature = (mapping=None))]
+    pub fn new(
+        #[gen_stub(override_type(type_repr = "dict[typing.Any, typing.Any] | None"))]
+        mapping: Option<&Bound<'_, PyAny>>,
+    ) -> Self {
+        let _ = mapping;
+        UserHeaders
     }
 
-    let value_is_typed = value.extract::<PyRef<'_, HeaderValue>>().is_ok();
-    let value_is_plain = is_plain_header_value(value);
-    if key_is_plain && value_is_plain {
-        return Ok(PyUserHeadersKind::Plain);
+    /// Converts these headers into the convenient plain dictionary form.
+    ///
+    /// Every header kind maps losslessly onto a Python scalar, so this never
+    /// loses information; it only returns an error if a stored field cannot be
+    /// decoded.
+    #[gen_stub(override_return_type(
+        type_repr = "dict[str | bytes | bool | int | float, str | bytes | bool | int | float]"
+    ))]
+    pub fn to_plain<'a>(slf: &Bound<'a, Self>) -> PyResult<Bound<'a, PyDict>> {
+        let py = slf.py();
+        let dict = slf.as_any().cast::<PyDict>()?;
+        let headers = py_user_headers_to_rust(py, dict)?;
+        rust_user_headers_to_plain_py(py, headers)
     }
-
-    if key_is_typed && value_is_typed {
-        return Ok(PyUserHeadersKind::Typed);
-    }
-
-    if key_is_typed {
-        return Err(PyValueError::new_err(
-            "User header values must be HeaderValue when keys are HeaderKey",
-        ));
-    }
-
-    if value_is_typed {
-        return Err(PyValueError::new_err(
-            "User header keys must be HeaderKey when values are HeaderValue",
-        ));
-    }
-
-    Err(PyValueError::new_err(
-        "User header values must be str, bytes, bool, int, float, or HeaderValue",
-    ))
 }
 
 fn py_header_key_to_rust(py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<RustHeaderKey> {
+    // A typed `HeaderKey` already carries an explicit wire type.
     if let Ok(header_key) = key.extract::<PyRef<'_, HeaderKey>>() {
         return header_key.to_rust(py);
     }
 
-    let key = key
-        .extract::<String>()
-        .map_err(|_| PyValueError::new_err("User header keys must be strings or HeaderKey"))?;
-    RustHeaderKey::from_str(&key).map_err(to_value_error)
-}
-
-fn is_plain_header_value(value: &Bound<'_, PyAny>) -> bool {
-    value.is_instance_of::<PyBool>()
-        || value.is_instance_of::<PyInt>()
-        || value.is_instance_of::<PyFloat>()
-        || value.is_instance_of::<PyString>()
-        || value.is_instance_of::<PyBytes>()
+    // Otherwise best-effort convert the plain Python scalar.
+    plain_to_header_field(key)?.ok_or_else(|| {
+        PyValueError::new_err("User header keys must be str, bytes, bool, int, float, or HeaderKey")
+    })
 }
 
 fn py_header_value_to_rust(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<RustHeaderValue> {
+    // A typed `HeaderValue` already carries an explicit wire type.
     if let Ok(header_value) = value.extract::<PyRef<'_, HeaderValue>>() {
         return header_value.to_rust(py);
     }
 
-    if value.is_instance_of::<PyBool>() {
-        return value.extract::<bool>().map(RustHeaderValue::from);
-    }
+    // Otherwise best-effort convert the plain Python scalar.
+    plain_to_header_field(value)?.ok_or_else(|| {
+        PyValueError::new_err(
+            "User header values must be str, bytes, bool, int, float, or HeaderValue",
+        )
+    })
+}
 
-    if value.is_instance_of::<PyInt>() {
-        return value
-            .extract::<i64>()
-            .map(RustHeaderValue::from)
-            .map_err(|_| {
-                PyValueError::new_err("User header int values must fit in signed 64-bit range")
-            });
+/// Converts a plain Python scalar into a header field (used for both keys and
+/// values). Returns `Ok(None)` when the object is not a supported plain type so
+/// the caller can raise a message naming keys vs values; genuine range/length
+/// errors are returned as `Err`.
+fn plain_to_header_field<T>(obj: &Bound<'_, PyAny>) -> PyResult<Option<HeaderField<T>>> {
+    // `bool` must be checked before `int` since Python bools are also ints.
+    if obj.is_instance_of::<PyBool>() {
+        return Ok(Some(obj.extract::<bool>()?.into()));
     }
-
-    if value.is_instance_of::<PyFloat>() {
-        return value.extract::<f64>().map(RustHeaderValue::from);
+    if obj.is_instance_of::<PyInt>() {
+        return int_to_header_field(obj).map(Some);
     }
-
-    if value.is_instance_of::<PyString>() {
-        let value = value.extract::<String>()?;
-        return RustHeaderValue::try_from(value).map_err(to_value_error);
+    if obj.is_instance_of::<PyFloat>() {
+        return Ok(Some(float_to_header_field(obj.extract::<f64>()?)));
     }
-
-    if value.is_instance_of::<PyBytes>() {
-        let value = value.extract::<Vec<u8>>()?;
-        return RustHeaderValue::try_from(value).map_err(to_value_error);
+    if obj.is_instance_of::<PyString>() {
+        return HeaderField::try_from(obj.extract::<String>()?)
+            .map(Some)
+            .map_err(to_value_error);
     }
+    if obj.is_instance_of::<PyBytes>() {
+        return HeaderField::try_from(obj.extract::<Vec<u8>>()?)
+            .map(Some)
+            .map_err(to_value_error);
+    }
+    Ok(None)
+}
 
+/// Picks the smallest header integer kind that represents the value exactly:
+/// non-negative values use the narrowest unsigned kind, negatives the narrowest
+/// signed kind. Values beyond the 128-bit range are rejected.
+fn int_to_header_field<T>(obj: &Bound<'_, PyAny>) -> PyResult<HeaderField<T>> {
+    if let Ok(value) = obj.extract::<u8>() {
+        return Ok(value.into());
+    }
+    if let Ok(value) = obj.extract::<u16>() {
+        return Ok(value.into());
+    }
+    if let Ok(value) = obj.extract::<u32>() {
+        return Ok(value.into());
+    }
+    if let Ok(value) = obj.extract::<u64>() {
+        return Ok(value.into());
+    }
+    if let Ok(value) = obj.extract::<u128>() {
+        return Ok(value.into());
+    }
+    if let Ok(value) = obj.extract::<i8>() {
+        return Ok(value.into());
+    }
+    if let Ok(value) = obj.extract::<i16>() {
+        return Ok(value.into());
+    }
+    if let Ok(value) = obj.extract::<i32>() {
+        return Ok(value.into());
+    }
+    if let Ok(value) = obj.extract::<i64>() {
+        return Ok(value.into());
+    }
+    if let Ok(value) = obj.extract::<i128>() {
+        return Ok(value.into());
+    }
     Err(PyValueError::new_err(
-        "User header values must be str, bytes, bool, int, float, or HeaderValue",
+        "User header int values must fit within the 128-bit range",
     ))
+}
+
+/// Uses `Float32` when the value is exactly representable as an f32, otherwise
+/// `Float64`, so the plain float is always stored losslessly.
+fn float_to_header_field<T>(value: f64) -> HeaderField<T> {
+    let narrowed = value as f32;
+    if f64::from(narrowed) == value {
+        narrowed.into()
+    } else {
+        value.into()
+    }
+}
+
+fn checked_float32<T>(value: f32) -> PyResult<HeaderField<T>> {
+    if !value.is_finite() {
+        return Err(PyValueError::new_err(
+            "Float32 header must be a finite value within the 32-bit float range",
+        ));
+    }
+    Ok(value.into())
 }
 
 fn rust_user_headers_to_plain_py<'a>(
     py: Python<'a>,
     headers: RustUserHeaders,
 ) -> PyResult<Bound<'a, PyDict>> {
+    // Every header kind maps losslessly onto a Python scalar, so the conversion
+    // is direct and only surfaces genuine decode errors.
     let result = PyDict::new(py);
     for (key, value) in headers {
-        let key = key.as_str().map_err(to_value_error)?;
-        let value = rust_header_value_to_plain_py(py, &value)?;
+        let key = header_field_to_plain_py(py, &key)?;
+        let value = header_field_to_plain_py(py, &value)?;
         result.set_item(key, value)?;
     }
     Ok(result)
 }
 
-fn rust_header_value_to_plain_py<'a>(
+fn header_field_to_plain_py<'a, T>(
     py: Python<'a>,
-    value: &RustHeaderValue,
+    field: &HeaderField<T>,
 ) -> PyResult<Bound<'a, PyAny>> {
-    match value.kind() {
-        HeaderKind::Raw => Ok(PyBytes::new(py, value.as_raw().map_err(to_value_error)?).into_any()),
-        HeaderKind::String => Ok(value
+    let plain = match field.kind() {
+        HeaderKind::Raw => PyBytes::new(py, field.as_raw().map_err(to_value_error)?).into_any(),
+        HeaderKind::String => field
             .as_str()
             .map_err(to_value_error)?
             .into_pyobject(py)?
-            .into_any()),
-        HeaderKind::Bool => Ok(value
+            .into_any(),
+        HeaderKind::Bool => field
             .as_bool()
             .map_err(to_value_error)?
             .into_pyobject(py)?
             .to_owned()
-            .into_any()),
-        HeaderKind::Int64 => Ok(value
+            .into_any(),
+        HeaderKind::Int8 => field
+            .as_int8()
+            .map_err(to_value_error)?
+            .into_pyobject(py)?
+            .into_any(),
+        HeaderKind::Int16 => field
+            .as_int16()
+            .map_err(to_value_error)?
+            .into_pyobject(py)?
+            .into_any(),
+        HeaderKind::Int32 => field
+            .as_int32()
+            .map_err(to_value_error)?
+            .into_pyobject(py)?
+            .into_any(),
+        HeaderKind::Int64 => field
             .as_int64()
             .map_err(to_value_error)?
             .into_pyobject(py)?
-            .into_any()),
-        HeaderKind::Float64 => Ok(value
+            .into_any(),
+        HeaderKind::Int128 => field
+            .as_int128()
+            .map_err(to_value_error)?
+            .into_pyobject(py)?
+            .into_any(),
+        HeaderKind::Uint8 => field
+            .as_uint8()
+            .map_err(to_value_error)?
+            .into_pyobject(py)?
+            .into_any(),
+        HeaderKind::Uint16 => field
+            .as_uint16()
+            .map_err(to_value_error)?
+            .into_pyobject(py)?
+            .into_any(),
+        HeaderKind::Uint32 => field
+            .as_uint32()
+            .map_err(to_value_error)?
+            .into_pyobject(py)?
+            .into_any(),
+        HeaderKind::Uint64 => field
+            .as_uint64()
+            .map_err(to_value_error)?
+            .into_pyobject(py)?
+            .into_any(),
+        HeaderKind::Uint128 => field
+            .as_uint128()
+            .map_err(to_value_error)?
+            .into_pyobject(py)?
+            .into_any(),
+        HeaderKind::Float32 => f64::from(field.as_float32().map_err(to_value_error)?)
+            .into_pyobject(py)?
+            .into_any(),
+        HeaderKind::Float64 => field
             .as_float64()
             .map_err(to_value_error)?
             .into_pyobject(py)?
-            .into_any()),
-        _ => unreachable!("plain header conversion is guarded by can_use_plain_headers"),
-    }
-}
-
-fn can_use_plain_headers(headers: &RustUserHeaders) -> bool {
-    headers.iter().all(|(key, value)| {
-        key.kind() == HeaderKind::String
-            && matches!(
-                value.kind(),
-                HeaderKind::Raw
-                    | HeaderKind::String
-                    | HeaderKind::Bool
-                    | HeaderKind::Int64
-                    | HeaderKind::Float64
-            )
-    })
+            .into_any(),
+    };
+    Ok(plain)
 }
 
 fn header_key_richcmp<'py>(

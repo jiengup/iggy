@@ -23,7 +23,7 @@ import time
 from collections.abc import Mapping
 from typing import NamedTuple
 
-from apache_iggy import IggyClient, StreamDetails, TopicDetails
+from apache_iggy import HeaderKey, HeaderValue, IggyClient, StreamDetails, TopicDetails
 from apache_iggy import SendMessage as Message
 from loguru import logger
 
@@ -37,7 +37,9 @@ ORDER_CREATED_TYPE = "OrderCreated"
 ORDER_CONFIRMED_TYPE = "OrderConfirmed"
 ORDER_REJECTED_TYPE = "OrderRejected"
 
-HeaderValue = str | bytes | bool | int | float
+PlainHeaderValue = str | bytes | bool | int | float
+PlainHeaders = dict[str, PlainHeaderValue]
+TypedHeaders = dict[HeaderKey, HeaderValue]
 
 
 class ArgNamespace(NamedTuple):
@@ -47,7 +49,7 @@ class ArgNamespace(NamedTuple):
 class SerializedMessage(NamedTuple):
     message_type: str
     payload: str
-    headers: dict[str, HeaderValue]
+    headers: PlainHeaders | TypedHeaders
 
 
 class MessagesGenerator:
@@ -83,7 +85,33 @@ class MessagesGenerator:
         self, message_type: str, payload: Mapping[str, object]
     ) -> SerializedMessage:
         encoded_payload = json.dumps(payload)
-        headers: dict[str, HeaderValue] = {
+        if self.order_id % 5 == 0:
+            # Add typed headers similar to the Rust core
+            typed_headers: TypedHeaders = {
+                HeaderKey.String("message-type"): HeaderValue.String(message_type),
+                HeaderKey.String("content-type"): HeaderValue.String(
+                    "application/json"
+                ),
+                HeaderKey.String("schema-version"): HeaderValue.UnsignedInt16(1),
+                HeaderKey.String("created-at-ms"): HeaderValue.UnsignedInt64(
+                    int(time.time() * 1000)
+                ),
+                HeaderKey.String("retryable"): HeaderValue.Bool(
+                    message_type == ORDER_REJECTED_TYPE
+                ),
+                HeaderKey.String("priority-score"): HeaderValue.Float32(
+                    (self.order_id % 100) / 100
+                ),
+                HeaderKey.String("trace-bin"): HeaderValue.Raw(
+                    f"trace-{self.order_id}".encode()
+                ),
+                HeaderKey.UnsignedInt32(self.order_id): HeaderValue.String("order-id"),
+            }
+            return SerializedMessage(message_type, encoded_payload, typed_headers)
+
+        # Add easy-to-use `dict[str, str | bytes | bool | int | float]` headers
+        # which will be translated into typed headers by the Python SDK
+        plain_headers: PlainHeaders = {
             "message-type": message_type,
             "content-type": "application/json",
             "schema-version": 1,
@@ -92,7 +120,7 @@ class MessagesGenerator:
             "priority-score": (self.order_id % 100) / 100,
             "trace-bin": f"trace-{self.order_id}".encode(),
         }
-        return SerializedMessage(message_type, encoded_payload, headers)
+        return SerializedMessage(message_type, encoded_payload, plain_headers)
 
 
 def parse_args() -> ArgNamespace:
@@ -192,13 +220,16 @@ async def produce_messages(client: IggyClient):
     logger.info(f"Sent {sent_batches} batches of messages, exiting.")
 
 
-def format_headers(headers: Mapping[str, HeaderValue]) -> dict[str, str]:
+def format_headers(
+    headers: Mapping[str, PlainHeaderValue] | Mapping[HeaderKey, HeaderValue],
+) -> dict[str, str]:
     formatted: dict[str, str] = {}
     for key, value in headers.items():
+        formatted_key = repr(key) if isinstance(key, HeaderKey) else key
         if isinstance(value, bytes):
-            formatted[key] = f"bytes({value.hex()})"
+            formatted[formatted_key] = f"bytes({value.hex()})"
         else:
-            formatted[key] = f"{value!r} ({type(value).__name__})"
+            formatted[formatted_key] = f"{value!r} ({type(value).__name__})"
     return formatted
 
 

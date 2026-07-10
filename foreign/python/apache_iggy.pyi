@@ -41,6 +41,7 @@ __all__ = [
     "StreamDetails",
     "Topic",
     "TopicDetails",
+    "UserHeaders",
 ]
 
 class AutoCommit:
@@ -1067,13 +1068,7 @@ class ReceiveMessage:
         r"""
         Retrieves the partition this message belongs to.
         """
-    def user_headers(
-        self,
-    ) -> (
-        dict[str, str | bytes | bool | int | float]
-        | dict[HeaderKey, HeaderValue]
-        | None
-    ):
+    def user_headers(self) -> UserHeaders | None:
         r"""
         Retrieves user headers attached to the received message.
         """
@@ -1088,9 +1083,7 @@ class SendMessage:
     def __new__(
         cls,
         data: builtins.str | bytes,
-        user_headers: dict[str, str | bytes | bool | int | float]
-        | dict[HeaderKey, HeaderValue]
-        | None = None,
+        user_headers: dict[typing.Any, typing.Any] | None = None,
         id: builtins.int | None = None,
     ) -> SendMessage:
         r"""
@@ -1164,4 +1157,35 @@ class TopicDetails:
     def replication_factor(self) -> builtins.int:
         r"""
         Replication factor for the topic.
+        """
+
+@typing.final
+class UserHeaders(dict):
+    r"""
+    User headers dictionary returned by `ReceiveMessage.user_headers`.
+
+    This is a regular `dict[HeaderKey, HeaderValue]` (so all mapping
+    operations work) that additionally exposes `to_plain` for the convenient
+    scalar form.
+    """
+    def __new__(
+        cls, mapping: dict[typing.Any, typing.Any] | None = None
+    ) -> UserHeaders:
+        r"""
+        Wraps a mapping so its entries gain the `to_plain` helper.
+
+        Accepts a dict whose keys and values can each independently be
+        `HeaderKey`/`HeaderValue` or a plain scalar (`str | bytes | bool |
+        int | float`). The inherited `dict` initializer copies the provided
+        mapping.
+        """
+    def to_plain(
+        self,
+    ) -> dict[str | bytes | bool | int | float, str | bytes | bool | int | float]:
+        r"""
+        Converts these headers into the convenient plain dictionary form.
+
+        Every header kind maps losslessly onto a Python scalar, so this never
+        loses information; it only returns an error if a stored field cannot be
+        decoded.
         """

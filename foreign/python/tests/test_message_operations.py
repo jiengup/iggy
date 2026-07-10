@@ -16,17 +16,19 @@
 # under the License.
 
 import asyncio
-import base64
-import http.client
-import json
-import os
-import struct
+import logging
 import uuid
 from typing import TypeAlias
 
 import pytest
 
-from apache_iggy import HeaderKey, HeaderValue, IggyClient, PollingStrategy
+from apache_iggy import (
+    HeaderKey,
+    HeaderValue,
+    IggyClient,
+    PollingStrategy,
+    UserHeaders,
+)
 from apache_iggy import SendMessage as Message
 
 HTTP_CREATED = 201
@@ -156,7 +158,7 @@ class TestMessageOperations:
     async def test_message_user_headers_round_trip(
         self, iggy_client: IggyClient, unique_name
     ):
-        """Test user headers preserve common Python value types."""
+        """Test plain user headers round-trip through the typed representation."""
         stream_name = unique_name()
         topic_name = unique_name()
         partition_id = 0
@@ -199,7 +201,16 @@ class TestMessageOperations:
         assert len(polled_messages) == 1
         message = polled_messages[0]
         assert message.id() == message_id
-        assert message.user_headers() == user_headers
+        typed_headers = message.user_headers()
+        assert typed_headers is not None
+        assert typed_headers == {
+            HeaderKey.String("content-type"): HeaderValue.String("application/json"),
+            HeaderKey.String("trace-blob"): HeaderValue.Raw(b"\x00\x01"),
+            HeaderKey.String("is-retry"): HeaderValue.Bool(False),
+            HeaderKey.String("attempt"): HeaderValue.UnsignedInt8(3),
+            HeaderKey.String("score"): HeaderValue.Float64(0.99),
+        }
+        assert typed_headers.to_plain() == user_headers
         assert isinstance(message.origin_timestamp(), int)
         assert message.origin_timestamp() > 0
 
@@ -244,6 +255,56 @@ class TestMessageOperations:
         assert headers == user_headers
 
     @pytest.mark.asyncio
+    async def test_plain_scalars_pick_smallest_lossless_kind(
+        self, iggy_client: IggyClient, unique_name
+    ):
+        """Test plain ints/floats map to the narrowest lossless header kind."""
+        stream_name = unique_name()
+        topic_name = unique_name()
+        partition_id = 0
+        plain_headers = {
+            "small": 200,
+            "negative": -5,
+            "large": 2**63,
+            "huge": 2**96,
+            "exact-float": 1.25,
+            "wide-float": 0.1,
+        }
+
+        await iggy_client.create_stream(stream_name)
+        await iggy_client.create_topic(
+            stream=stream_name, name=topic_name, partitions_count=1
+        )
+
+        await iggy_client.send_messages(
+            stream=stream_name,
+            topic=topic_name,
+            partitioning=partition_id,
+            messages=[Message("plain scalars", user_headers=plain_headers)],
+        )
+
+        polled_messages = await iggy_client.poll_messages(
+            stream=stream_name,
+            topic=topic_name,
+            partition_id=partition_id,
+            polling_strategy=PollingStrategy.Last(),
+            count=1,
+            auto_commit=True,
+        )
+
+        headers = polled_messages[0].user_headers()
+        assert headers is not None
+        assert headers == {
+            HeaderKey.String("small"): HeaderValue.UnsignedInt8(200),
+            HeaderKey.String("negative"): HeaderValue.Int8(-5),
+            HeaderKey.String("large"): HeaderValue.UnsignedInt64(2**63),
+            HeaderKey.String("huge"): HeaderValue.UnsignedInt128(2**96),
+            HeaderKey.String("exact-float"): HeaderValue.Float32(1.25),
+            HeaderKey.String("wide-float"): HeaderValue.Float64(0.1),
+        }
+        assert headers.to_plain() == plain_headers
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "payload",
         ["", b""],
@@ -262,16 +323,33 @@ class TestMessageOperations:
             ({"key": ""}, "Invalid header value"),
             ({"key": b""}, "Invalid header value"),
             ({"key": "x" * 256}, "Invalid header value"),
-            ({1: "value"}, "User header keys must be strings"),
+            ({object(): "value"}, "User header keys must be"),
             ({"key": object()}, "User header values must be"),
-            ({"key": 2**63}, "signed 64-bit range"),
-            ({HeaderKey.String("key"): "value"}, "HeaderValue"),
+            ({"key": 2**128}, "128-bit range"),
+            ({"key": -(2**200)}, "128-bit range"),
         ],
     )
     async def test_invalid_user_headers_are_rejected(self, headers, error):
         """Test invalid user header input raises ValueError."""
         with pytest.raises(ValueError, match=error):
             Message("payload", user_headers=headers)
+
+    def test_explicit_float32_out_of_range_is_rejected(self):
+        """Test an explicit Float32 whose value overflows f32 is rejected."""
+        with pytest.raises(ValueError, match="32-bit float"):
+            Message("payload", user_headers={"k": HeaderValue.Float32(1e40)})
+
+    def test_mixed_typed_and_plain_headers_can_be_constructed(self):
+        """Test each key/value pair is converted independently and can be mixed."""
+        Message(
+            "payload",
+            user_headers={
+                HeaderKey.String("typed-key"): HeaderValue.UnsignedInt16(7),
+                HeaderKey.String("plain-value"): "still-a-string",
+                "plain-key": HeaderValue.Bool(True),
+                "fully-plain": 42,
+            },
+        )
 
     def test_typed_user_headers_can_be_constructed(self):
         """Test typed header keys and values cover the full header kind surface."""
@@ -295,6 +373,55 @@ class TestMessageOperations:
                 HeaderKey.Float64(3.5): HeaderValue.Float64(4.75),
             },
         )
+
+    def test_plain_user_headers_convert_every_kind_losslessly(self, caplog):
+        """Test every header kind converts to a plain scalar without logging."""
+        headers = UserHeaders(
+            {
+                HeaderKey.String("content-type"): HeaderValue.String(
+                    "application/json"
+                ),
+                HeaderKey.String("trace-blob"): HeaderValue.Raw(b"\x00\x01"),
+                HeaderKey.String("is-retry"): HeaderValue.Bool(True),
+                HeaderKey.String("attempt"): HeaderValue.Int64(3),
+                HeaderKey.String("schema-version"): HeaderValue.UnsignedInt16(1),
+                HeaderKey.String("big"): HeaderValue.UnsignedInt128(2**96),
+                HeaderKey.String("ratio"): HeaderValue.Float32(1.25),
+                HeaderKey.String("score"): HeaderValue.Float64(0.5),
+            }
+        )
+
+        with caplog.at_level(logging.WARNING, logger="apache_iggy"):
+            plain = headers.to_plain()
+
+        assert plain == {
+            "content-type": "application/json",
+            "trace-blob": b"\x00\x01",
+            "is-retry": True,
+            "attempt": 3,
+            "schema-version": 1,
+            "big": 2**96,
+            "ratio": 1.25,
+            "score": 0.5,
+        }
+        assert caplog.records == []
+
+    def test_plain_user_headers_accepts_plain_dict(self):
+        """Test the plain dictionary form passes through unchanged."""
+        headers = {"content-type": "application/json", "attempt": 3}
+        assert UserHeaders(headers).to_plain() == headers
+
+    def test_plain_user_headers_preserve_non_string_keys(self, caplog):
+        """Test non-string typed keys convert back to their scalar Python type."""
+        headers = UserHeaders(
+            {HeaderKey.UnsignedInt32(7): HeaderValue.String("order-id")}
+        )
+
+        with caplog.at_level(logging.WARNING, logger="apache_iggy"):
+            plain = headers.to_plain()
+
+        assert plain == {7: "order-id"}
+        assert caplog.records == []
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -923,84 +1050,3 @@ class TestMessageOperations:
         assert [
             message.payload().decode("utf-8") for message in next_messages
         ] == existing_messages + new_messages
-
-
-def send_message_with_http_headers(
-    stream: str,
-    topic: str,
-    payload: str,
-    user_headers: list[JsonValue],
-):
-    host = os.environ.get("IGGY_SERVER_HOST", "127.0.0.1")
-    port = int(os.environ.get("IGGY_SERVER_HTTP_PORT", "3000"))
-    token = login_http_user(host, port)
-    body: dict[str, JsonValue] = {
-        "partitioning": {
-            "kind": "partition_id",
-            "value": encode_bytes((0).to_bytes(4)),
-        },
-        "messages": [
-            {
-                "payload": encode_bytes(payload.encode()),
-                "user_headers": user_headers,
-            }
-        ],
-    }
-
-    response_status, response_body = request_json(
-        host,
-        port,
-        "POST",
-        f"/streams/{stream}/topics/{topic}/messages",
-        body,
-        token,
-    )
-
-    assert response_status == HTTP_CREATED, response_body
-
-
-def login_http_user(host: str, port: int) -> str:
-    response_status, response_body = request_json(
-        host,
-        port,
-        "POST",
-        "/users/login",
-        {"username": "iggy", "password": "iggy"},
-    )
-
-    assert response_status == 200, response_body
-    token_info = json.loads(response_body)["access_token"]
-    return token_info["token"]
-
-
-def request_json(
-    host: str,
-    port: int,
-    method: str,
-    path: str,
-    body: dict[str, JsonValue],
-    token: str | None = None,
-) -> tuple[int, str]:
-    headers = {"Content-Type": "application/json"}
-    if token is not None:
-        headers["Authorization"] = f"Bearer {token}"
-
-    connection = http.client.HTTPConnection(host, port)
-    try:
-        connection.request(method, path, json.dumps(body), headers)
-        response = connection.getresponse()
-        response_body = response.read().decode()
-        return response.status, response_body
-    finally:
-        connection.close()
-
-
-def header_entry(key: str, kind: str, value: bytes) -> dict[str, JsonValue]:
-    return {
-        "key": {"kind": "string", "value": encode_bytes(key.encode())},
-        "value": {"kind": kind, "value": encode_bytes(value)},
-    }
-
-
-def encode_bytes(value: bytes) -> str:
-    return base64.b64encode(value).decode()
